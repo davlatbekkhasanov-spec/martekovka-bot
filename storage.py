@@ -25,6 +25,7 @@ class Session:
     poz: int
     photo_count: int
     tick_at: str | None
+    ended_at: str | None = None
 
 
 def _conn(db_path: str) -> sqlite3.Connection:
@@ -99,6 +100,7 @@ def _row_to_session(row: sqlite3.Row | None) -> Session | None:
         poz=int(row["poz"] or 0),
         photo_count=int(row["photo_count"] or 0) if "photo_count" in keys else 0,
         tick_at=str(row["tick_at"]) if row["tick_at"] else None,
+        ended_at=str(row["ended_at"]) if "ended_at" in keys and row["ended_at"] else None,
     )
 
 

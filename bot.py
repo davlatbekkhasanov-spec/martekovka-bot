@@ -1,4 +1,4 @@
-"""Martekovka / markerovka — vaqt + miqdor + rasm, hub → Фасовка."""
+"""Martekovka / markerovka — vaqt + miqdor + rasm, hub → Маркеровка."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from employee_registry import TG_EMPLOYEE, operator_display_name
-from hub_summary import daily_summary, fmt_clock, session_summary
+from hub_summary import daily_summary, fmt_clock
 from persist_data import bootstrap_persistence, persistence_status_line, resolve_db_path
 from storage import (
     NORM_SEC_PER_POZ,
@@ -33,6 +33,12 @@ from storage import (
     today_done_sessions,
     today_stats,
 )
+from notify import (
+    finish_report,
+    group_finished_message,
+    group_started_message,
+    send_group,
+)
 from telegram_polling_guard import ensure_polling_mode
 from yordamchi_push import (
     push_session_end_background,
@@ -44,7 +50,7 @@ from yordamchi_push import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "1432810519").strip()
-GROUP_ID_RAW = os.getenv("GROUP_ID", "").strip()
+GROUP_ID_RAW = os.getenv("GROUP_ID", "-1001877019294").strip()
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 
 _DB_BOOT = bootstrap_persistence(
@@ -251,7 +257,7 @@ async def cmd_start(m: Message) -> None:
         f"• <b>{BTN_FINISH}</b> — pozitsiya + rasm\n"
         f"• Norm ichida: 1 poz = 1 ball\n"
         f"• Kechiksa: 20 poz = 1 ball\n\n"
-        "Natija yordamchi botda <b>Фасовка</b> ga tushadi.",
+        "Natija yordamchi botda <b>Маркеровка</b> qatoriga tushadi.",
         reply_markup=main_kb(),
     )
 
@@ -266,6 +272,7 @@ async def on_start_work(m: Message) -> None:
 
     ws = start_session(DB_PATH, uid)
     push_session_start_background(tg_id=uid, user_name=user_display_name(uid))
+    await send_group(bot, GROUP_ID, group_started_message(name=user_display_name(uid)))
     await m.answer(
         "▶️ <b>Ish boshlandi!</b>\n\n" + _status_text(ws),
         reply_markup=active_kb(),
@@ -312,20 +319,32 @@ async def on_done_photos(m: Message) -> None:
         return await m.answer("⚠️ Sessiyani yakunlab bo'lmadi.", reply_markup=photo_kb())
 
     pts = calc_points(done.poz, done.work_sec)
-    summary = session_summary(done)
     await sync_day_hub(uid)
     mark_hub_pushed(DB_PATH, done.id)
 
-    await m.answer(
-        f"✅ <b>Sessiya yakunlandi!</b>\n\n"
-        f"Pozitsiya: <b>{done.poz}</b>\n"
-        f"Ish vaqti: <b>{fmt_clock(done.work_sec)}</b>\n"
-        f"Norm: {NORM_SEC_PER_POZ} sek/poz → <b>{fmt_clock(done.poz * NORM_SEC_PER_POZ)}</b>\n"
-        f"Rasmlar: <b>{done.photo_count}</b> ta\n"
-        f"Ball: <b>{pts}</b>\n\n"
-        f"Hub: <code>{summary}</code>",
-        reply_markup=main_kb(),
+    name = user_display_name(uid)
+    report = finish_report(
+        name=name,
+        started_at=done.started_at,
+        ended_at=done.ended_at or "",
+        poz=done.poz,
+        work_sec=done.work_sec,
+        norm_sec_per_poz=NORM_SEC_PER_POZ,
+        photo_count=done.photo_count,
+        points=pts,
     )
+    await send_group(
+        bot,
+        GROUP_ID,
+        group_finished_message(
+            name=name,
+            poz=done.poz,
+            points=pts,
+            photos=done.photo_count,
+            work_sec=done.work_sec,
+        ),
+    )
+    await m.answer(report, reply_markup=main_kb())
 
 
 @rt.message(F.text == BTN_CANCEL)
