@@ -1,4 +1,4 @@
-"""Martekovka / markerovka — vaqt + miqdor + rasm, hub → Маркеровка."""
+"""Markirovka — vaqt + miqdor + rasm, hub → Маркеровка."""
 
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def _status_text(ws) -> str:
         "awaiting_photos": "📷 rasm kutilmoqda",
     }
     lines = [
-        "<b>Martekovka</b>",
+        "<b>Markirovka</b>",
         f"Holat: {labels.get(ws.status, ws.status)}",
         f"Ish vaqti: <b>{fmt_clock(work)}</b>",
         f"Norm: <b>{NORM_SEC_PER_POZ} sek/poz</b>",
@@ -423,7 +423,7 @@ async def on_photo(m: Message) -> None:
     if GROUP_ID:
         try:
             cap = (
-                f"📷 Martekovka rasm\n"
+                f"📷 Markirovka rasm\n"
                 f"{user_display_name(uid)} · sessiya #{ws.id}\n"
                 f"Poz: {ws.poz} · rasm #{ws.photo_count}"
             )
@@ -496,7 +496,7 @@ async def main() -> None:
     await set_commands()
     await startup_hub_backfill()
     await ensure_polling_mode(bot)
-    log.info("Martekovka bot started.")
+    log.info("Markirovka bot started.")
     await dp.start_polling(bot)
 
 

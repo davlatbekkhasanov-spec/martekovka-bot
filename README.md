@@ -1,6 +1,6 @@
 # martekovka-bot
 
-Martekovka (markerovka) vaqt + miqdor boti. Natijalar `davlat-yordamchi-bot` hub orqali **Фасовка** kategoriyasiga tushadi.
+Markirovka vaqt + miqdor + rasm boti. Natijalar `davlat-yordamchi-bot` hub orqali **Маркеровка** kategoriyasiga tushadi.
 
 ## Ishlatish
 
@@ -24,5 +24,5 @@ Volume: mount path `/data`
 ## Hub
 
 - `bot_key`: `martekovka`
-- Summary: `Martekovka: poz N, ish HH:MM:SS, dam HH:MM:SS`
+- Summary: `Markirovka: poz N, ish HH:MM:SS, norm 20s`
 - Ball: 1 poz = 1 ball (Фасовка)

@@ -55,12 +55,12 @@ async def send_group(bot: Bot, group_id: int, text: str) -> bool:
 
 
 def group_started_message(*, name: str) -> str:
-    return f"🏷️  <b>{_he(name)}</b> markerovka ishlarini boshladi"
+    return f"🏷️  <b>{_he(name)}</b> markirovka ishlarini boshladi"
 
 
 def group_finished_message(*, name: str, poz: int, points: int, photos: int, work_sec: int) -> str:
     return (
-        f"🏁  <b>{_he(name)}</b> markerovka ishlarini yakunladi\n"
+        f"🏁  <b>{_he(name)}</b> markirovka ishlarini yakunladi\n"
         f"📦 <b>{poz}</b> poz  ·  🏆 <b>{points}</b> ball  ·  "
         f"📷 <b>{photos}</b> rasm  ·  ⏱ <b>{fmt_duration_sec(work_sec)}</b>"
     )
@@ -111,7 +111,7 @@ def finish_report(
     t0 = fmt_hm(started_at)
     t1 = fmt_hm(ended_at) if ended_at else t0
 
-    ball_line = f"🏆 Markerovka: <b>{points}</b> ball"
+    ball_line = f"🏆 Markirovka: <b>{points}</b> ball"
     if points == poz and poz > 0:
         ball_line += "  <i>(1 poz = 1 ball)</i>"
     elif points < poz:
@@ -120,7 +120,7 @@ def finish_report(
     lines = [
         banner,
         "",
-        "📊 <b>MARKEROVKA YAKUNLANDI</b>",
+        "📊 <b>MARKIROVKA YAKUNLANDI</b>",
         "",
         f"👤 <b>{_he(name)}</b>",
         f"🕐 {date_str}  ·  <b>{t0}</b> → <b>{t1}</b>",
