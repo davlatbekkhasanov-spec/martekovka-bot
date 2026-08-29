@@ -90,12 +90,23 @@ def is_worker(uid: int) -> bool:
     return int(uid) in TG_EMPLOYEE
 
 
+def can_use_bot(uid: int) -> bool:
+    """Xodimlar + adminlar botdan foydalanadi."""
+    return is_worker(uid) or is_admin(uid)
+
+
+def user_display_name(uid: int) -> str:
+    if is_admin(uid) and not is_worker(uid):
+        return "Admin"
+    return operator_display_name(uid)
+
+
 async def deny_if_not_worker(m: Message) -> bool:
-    """Faqat ro'yxatdagi xodimlar — boshqalar blok."""
+    """Faqat ruxsat berilgan ID lar — boshqalar blok."""
     if not m.from_user:
         return True
     uid = m.from_user.id
-    if is_worker(uid):
+    if can_use_bot(uid):
         return False
     await m.answer(
         "❌ Bu bot faqat ruxsat berilgan xodimlar uchun.\n"
@@ -171,7 +182,7 @@ async def cmd_start(m: Message) -> None:
     if not m.from_user:
         return
     uid = m.from_user.id
-    if not is_worker(uid):
+    if not can_use_bot(uid):
         return await m.answer(
             "❌ Siz ro'yxatda yo'qsiz.\n"
             f"Telegram ID: <code>{uid}</code>\n"
@@ -190,7 +201,7 @@ async def cmd_start(m: Message) -> None:
             )
         return await m.answer(_status_text(ws), reply_markup=kb)
 
-    name = operator_display_name(uid)
+    name = user_display_name(uid)
     await m.answer(
         f"Assalomu alaykum, <b>{name}</b>! 👋\n\n"
         "Martekovka vaqt + miqdor boti.\n"
@@ -210,7 +221,7 @@ async def on_start(m: Message) -> None:
         return await cmd_start(m)
 
     ws = start_session(DB_PATH, uid)
-    name = operator_display_name(uid)
+    name = user_display_name(uid)
     push_session_start_background(tg_id=uid, user_name=name)
     await m.answer(
         "▶️ <b>Ish boshlandi!</b>\n\n" + _status_text(ws),
@@ -283,7 +294,7 @@ async def on_today(m: Message) -> None:
     if open_ws:
         extra = f"\n\n⚠️ Ochiq sessiya: {open_ws.status}"
     await m.answer(
-        f"📊 <b>Bugun — {operator_display_name(uid)}</b>\n"
+        f"📊 <b>Bugun — {user_display_name(uid)}</b>\n"
         f"Sessiyalar: <b>{n}</b>\n"
         f"Jami pozitsiya: <b>{poz}</b>\n"
         f"Ish vaqti: <b>{fmt_clock(sec)}</b>{extra}",
@@ -332,9 +343,10 @@ async def cmd_whoami(m: Message) -> None:
     uid = m.from_user.id
     await m.answer(
         f"ID: <code>{uid}</code>\n"
-        f"Ism: <b>{operator_display_name(uid)}</b>\n"
+        f"Ism: <b>{user_display_name(uid)}</b>\n"
         f"Xodim: {'✅' if is_worker(uid) else '❌'}\n"
-        f"Admin: {'✅' if is_admin(uid) else '❌'}"
+        f"Admin: {'✅' if is_admin(uid) else '❌'}\n"
+        f"Bot: {'✅' if can_use_bot(uid) else '❌'}"
     )
 
 
