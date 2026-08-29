@@ -90,6 +90,21 @@ def is_worker(uid: int) -> bool:
     return int(uid) in TG_EMPLOYEE
 
 
+async def deny_if_not_worker(m: Message) -> bool:
+    """Faqat ro'yxatdagi xodimlar — boshqalar blok."""
+    if not m.from_user:
+        return True
+    uid = m.from_user.id
+    if is_worker(uid):
+        return False
+    await m.answer(
+        "❌ Bu bot faqat ruxsat berilgan xodimlar uchun.\n"
+        f"Sizning Telegram ID: <code>{uid}</code>",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return True
+
+
 def idle_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_TODAY)]],
@@ -156,11 +171,12 @@ async def cmd_start(m: Message) -> None:
     if not m.from_user:
         return
     uid = m.from_user.id
-    if not is_worker(uid) and not is_admin(uid):
+    if not is_worker(uid):
         return await m.answer(
             "❌ Siz ro'yxatda yo'qsiz.\n"
             f"Telegram ID: <code>{uid}</code>\n"
-            "Rahbariyatga murojaat qiling."
+            "Rahbariyatga murojaat qiling.",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
     ws = get_open_session(DB_PATH, uid)
@@ -187,8 +203,8 @@ async def cmd_start(m: Message) -> None:
 
 @rt.message(F.text == BTN_START)
 async def on_start(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
-        return await m.answer("Ruxsat yo'q.")
+    if await deny_if_not_worker(m):
+        return
     uid = m.from_user.id
     if get_open_session(DB_PATH, uid):
         return await cmd_start(m)
@@ -204,7 +220,7 @@ async def on_start(m: Message) -> None:
 
 @rt.message(F.text == BTN_PAUSE)
 async def on_pause(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
+    if await deny_if_not_worker(m):
         return
     ws = pause_session(DB_PATH, m.from_user.id)
     if not ws:
@@ -214,7 +230,7 @@ async def on_pause(m: Message) -> None:
 
 @rt.message(F.text == BTN_RESUME)
 async def on_resume(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
+    if await deny_if_not_worker(m):
         return
     ws = resume_session(DB_PATH, m.from_user.id)
     if not ws:
@@ -224,7 +240,7 @@ async def on_resume(m: Message) -> None:
 
 @rt.message(F.text == BTN_FINISH)
 async def on_finish(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
+    if await deny_if_not_worker(m):
         return
     uid = m.from_user.id
     ws = request_finish(DB_PATH, uid)
@@ -241,7 +257,7 @@ async def on_finish(m: Message) -> None:
 
 @rt.message(F.text == BTN_CANCEL)
 async def on_cancel(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
+    if await deny_if_not_worker(m):
         return
     uid = m.from_user.id
     ws = get_open_session(DB_PATH, uid)
@@ -258,9 +274,9 @@ async def on_cancel(m: Message) -> None:
 async def on_today(m: Message) -> None:
     if not m.from_user:
         return
-    uid = m.from_user.id
-    if not is_worker(uid) and not is_admin(uid):
+    if await deny_if_not_worker(m):
         return
+    uid = m.from_user.id
     n, poz, sec = today_stats(DB_PATH, uid)
     open_ws = get_open_session(DB_PATH, uid)
     extra = ""
@@ -280,7 +296,7 @@ async def on_today(m: Message) -> None:
 
 @rt.message(F.text.regexp(r"^\d+$"), F.chat.type == "private")
 async def on_quantity(m: Message) -> None:
-    if not m.from_user or not is_worker(m.from_user.id):
+    if await deny_if_not_worker(m):
         return
     uid = m.from_user.id
     ws = get_open_session(DB_PATH, uid)
@@ -329,6 +345,12 @@ async def cmd_sync(m: Message) -> None:
     for tid in TG_EMPLOYEE:
         await sync_day_hub(tid)
     await m.answer("✅ Bugungi hub sync bajarildi.")
+
+
+@rt.message(F.chat.type == "private")
+async def on_private_unknown(m: Message) -> None:
+    """Ro'yxatda bo'lmaganlar — har qanday xabar blok."""
+    await deny_if_not_worker(m)
 
 
 async def startup_hub_backfill() -> None:
