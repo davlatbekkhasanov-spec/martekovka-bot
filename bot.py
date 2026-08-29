@@ -1,4 +1,4 @@
-"""Martekovka / markerovka — vaqt + miqdor, hub → Фасовка."""
+"""Martekovka / markerovka — vaqt + miqdor + rasm, hub → Фасовка."""
 
 from __future__ import annotations
 
@@ -6,27 +6,29 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import BotCommand, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from employee_registry import TG_EMPLOYEE, operator_display_name
 from hub_summary import daily_summary, fmt_clock, session_summary
 from persist_data import bootstrap_persistence, persistence_status_line, resolve_db_path
 from storage import (
+    NORM_SEC_PER_POZ,
+    add_session_photo,
+    calc_points,
     cancel_open,
-    complete_finish,
+    complete_session,
     get_open_session,
     init_db,
     live_work_seconds,
-    pause_session,
+    mark_hub_pushed,
     request_finish,
-    resume_session,
+    set_poz_await_photos,
     start_session,
     today_done_sessions,
     today_stats,
@@ -39,11 +41,10 @@ from yordamchi_push import (
     push_to_yordamchi_hub_background,
     today_iso,
 )
-from storage import mark_hub_pushed
 
-# ===================== CONFIG =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "1432810519").strip()
+GROUP_ID_RAW = os.getenv("GROUP_ID", "").strip()
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 
 _DB_BOOT = bootstrap_persistence(
@@ -51,6 +52,24 @@ _DB_BOOT = bootstrap_persistence(
     legacy_names=("martekovka.db",),
 )
 DB_PATH = _DB_BOOT["db_path"]
+GROUP_ID = int(GROUP_ID_RAW) if GROUP_ID_RAW.lstrip("-").isdigit() else 0
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN kerak (Railway Variables).")
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("martekovka-bot")
+
+BTN_START = "Boshlash"
+BTN_FINISH = "Tugatish"
+BTN_DONE = "Yakunlash"
+BTN_TODAY = "Bugun"
+BTN_CANCEL = "Bekor"
+
+rt = Router()
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+dp.include_router(rt)
 
 
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -63,24 +82,6 @@ def _parse_admin_ids(raw: str) -> set[int]:
 
 ADMIN_IDS = _parse_admin_ids(ADMIN_IDS_RAW)
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN kerak (Railway Variables).")
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("martekovka-bot")
-
-BTN_START = "▶️ Boshlash"
-BTN_PAUSE = "⏸ Tanaffus"
-BTN_RESUME = "▶️ Davom etish"
-BTN_FINISH = "✔️ Tugatish"
-BTN_TODAY = "📊 Bugun"
-BTN_CANCEL = "❌ Bekor qilish"
-
-rt = Router()
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-dp.include_router(rt)
-
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
@@ -91,7 +92,6 @@ def is_worker(uid: int) -> bool:
 
 
 def can_use_bot(uid: int) -> bool:
-    """Xodimlar + adminlar botdan foydalanadi."""
     return is_worker(uid) or is_admin(uid)
 
 
@@ -101,8 +101,65 @@ def user_display_name(uid: int) -> str:
     return operator_display_name(uid)
 
 
-async def deny_if_not_worker(m: Message) -> bool:
-    """Faqat ruxsat berilgan ID lar — boshqalar blok."""
+def main_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_TODAY)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Tugmani bosing...",
+    )
+
+
+def active_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_FINISH)],
+            [KeyboardButton(text=BTN_TODAY)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Ish vaqti ketmoqda...",
+    )
+
+
+def qty_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Pozitsiya sonini yozing...",
+    )
+
+
+def photo_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Rasm yuboring...",
+    )
+
+
+def kb_for_session(ws) -> ReplyKeyboardMarkup:
+    if ws.status == "active":
+        return active_kb()
+    if ws.status == "awaiting_qty":
+        return qty_kb()
+    if ws.status == "awaiting_photos":
+        return photo_kb()
+    return main_kb()
+
+
+async def deny_if_not_allowed(m: Message) -> bool:
     if not m.from_user:
         return True
     uid = m.from_user.id
@@ -116,44 +173,9 @@ async def deny_if_not_worker(m: Message) -> bool:
     return True
 
 
-def idle_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_TODAY)]],
-        resize_keyboard=True,
-    )
-
-
-def active_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_FINISH)],
-            [KeyboardButton(text=BTN_TODAY)],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def paused_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_RESUME), KeyboardButton(text=BTN_FINISH)],
-            [KeyboardButton(text=BTN_TODAY)],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def awaiting_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
-        resize_keyboard=True,
-    )
-
-
 async def sync_day_hub(tg_id: int, day: str | None = None) -> None:
     day_iso = day or today_iso()
-    sessions = today_done_sessions(DB_PATH, tg_id)
-    summary = daily_summary(sessions)
+    summary = daily_summary(today_done_sessions(DB_PATH, tg_id))
     ok, via = await push_to_yordamchi_hub(tg_id=tg_id, summary=summary, day_iso=day_iso)
     if ok:
         log.info("Hub sync uid=%s via=%s %s", tg_id, via, summary[:80])
@@ -163,18 +185,36 @@ async def sync_day_hub(tg_id: int, day: str | None = None) -> None:
 
 
 def _status_text(ws) -> str:
-    ish = fmt_clock(live_work_seconds(ws))
-    dam = fmt_clock(ws.pause_sec)
-    st = {"active": "▶️ ishlayapti", "paused": "⏸ pauzada", "awaiting_qty": "🏁 miqdor kutilmoqda"}.get(
-        ws.status, ws.status
-    )
-    return (
-        f"<b>Martekovka sessiyasi</b>\n"
-        f"Holat: {st}\n"
-        f"Ish vaqti: <b>{ish}</b>\n"
-        f"Tanaffus: <b>{dam}</b>\n"
-        f"Boshlangan: <code>{ws.started_at}</code>"
-    )
+    work = live_work_seconds(ws)
+    norm = ws.poz * NORM_SEC_PER_POZ if ws.poz else 0
+    labels = {
+        "active": "▶️ ishlayapti",
+        "awaiting_qty": "🔢 pozitsiya kutilmoqda",
+        "awaiting_photos": "📷 rasm kutilmoqda",
+    }
+    lines = [
+        "<b>Martekovka</b>",
+        f"Holat: {labels.get(ws.status, ws.status)}",
+        f"Ish vaqti: <b>{fmt_clock(work)}</b>",
+        f"Norm: <b>{NORM_SEC_PER_POZ} sek/poz</b>",
+    ]
+    if ws.poz:
+        lines.append(f"Pozitsiya: <b>{ws.poz}</b>")
+        lines.append(f"Norm vaqt: <b>{fmt_clock(norm)}</b>")
+    if ws.status == "awaiting_photos":
+        lines.append(f"Rasmlar: <b>{ws.photo_count}</b> ta")
+    return "\n".join(lines)
+
+
+async def set_commands() -> None:
+    cmds = [
+        BotCommand(command="start", description="Botni ochish"),
+        BotCommand(command="whoami", description="ID tekshirish"),
+    ]
+    try:
+        await bot.set_my_commands(cmds)
+    except Exception as e:
+        log.warning("set_my_commands: %s", e)
 
 
 @rt.message(Command("start"))
@@ -185,129 +225,145 @@ async def cmd_start(m: Message) -> None:
     if not can_use_bot(uid):
         return await m.answer(
             "❌ Siz ro'yxatda yo'qsiz.\n"
-            f"Telegram ID: <code>{uid}</code>\n"
-            "Rahbariyatga murojaat qiling.",
+            f"Telegram ID: <code>{uid}</code>",
             reply_markup=ReplyKeyboardRemove(),
         )
 
     ws = get_open_session(DB_PATH, uid)
     if ws:
-        kb = paused_kb() if ws.status == "paused" else active_kb()
         if ws.status == "awaiting_qty":
-            kb = awaiting_kb()
             return await m.answer(
-                "🏁 <b>Yakunlash davom etmoqda</b>\n\nNechta pozitsiya (markirovka) qildingiz?\nFaqat raqam yuboring.",
-                reply_markup=kb,
+                "🔢 Nechta pozitsiya (markirovka) qildingiz?\nFaqat raqam yuboring.",
+                reply_markup=qty_kb(),
             )
-        return await m.answer(_status_text(ws), reply_markup=kb)
+        if ws.status == "awaiting_photos":
+            return await m.answer(
+                f"📷 Markirovka qilingan tovarlar <b>rasmini</b> yuboring.\n"
+                f"Hozir: <b>{ws.photo_count}</b> ta rasm.\n"
+                f"Tugatish uchun <b>{BTN_DONE}</b> bosing.",
+                reply_markup=photo_kb(),
+            )
+        return await m.answer(_status_text(ws), reply_markup=kb_for_session(ws))
 
-    name = user_display_name(uid)
     await m.answer(
-        f"Assalomu alaykum, <b>{name}</b>! 👋\n\n"
-        "Martekovka vaqt + miqdor boti.\n"
-        "▶️ <b>Boshlash</b> — ish vaqtini hisoblash\n"
-        "✔️ <b>Tugatish</b> — pozitsiya sonini kiritish\n\n"
-        "Bugungi natija avtomatik yordamchi hisobotiga (Фасовка) tushadi.",
-        reply_markup=idle_kb(),
+        f"Assalomu alaykum, <b>{user_display_name(uid)}</b>! 👋\n\n"
+        f"• <b>{BTN_START}</b> — ish vaqti (norm: {NORM_SEC_PER_POZ} sek/poz)\n"
+        f"• <b>{BTN_FINISH}</b> — pozitsiya + rasm\n"
+        f"• Norm ichida: 1 poz = 1 ball\n"
+        f"• Kechiksa: 20 poz = 1 ball\n\n"
+        "Natija yordamchi botda <b>Фасовка</b> ga tushadi.",
+        reply_markup=main_kb(),
     )
 
 
 @rt.message(F.text == BTN_START)
-async def on_start(m: Message) -> None:
-    if await deny_if_not_worker(m):
+async def on_start_work(m: Message) -> None:
+    if await deny_if_not_allowed(m):
         return
     uid = m.from_user.id
     if get_open_session(DB_PATH, uid):
         return await cmd_start(m)
 
     ws = start_session(DB_PATH, uid)
-    name = user_display_name(uid)
-    push_session_start_background(tg_id=uid, user_name=name)
+    push_session_start_background(tg_id=uid, user_name=user_display_name(uid))
     await m.answer(
         "▶️ <b>Ish boshlandi!</b>\n\n" + _status_text(ws),
         reply_markup=active_kb(),
     )
 
 
-@rt.message(F.text == BTN_PAUSE)
-async def on_pause(m: Message) -> None:
-    if await deny_if_not_worker(m):
-        return
-    ws = pause_session(DB_PATH, m.from_user.id)
-    if not ws:
-        return await m.answer("⚠️ Faol sessiya yo'q yoki allaqachon pauzada.", reply_markup=idle_kb())
-    await m.answer("⏸ <b>Tanaffus</b>\n\n" + _status_text(ws), reply_markup=paused_kb())
-
-
-@rt.message(F.text == BTN_RESUME)
-async def on_resume(m: Message) -> None:
-    if await deny_if_not_worker(m):
-        return
-    ws = resume_session(DB_PATH, m.from_user.id)
-    if not ws:
-        return await m.answer("⚠️ Pauzada sessiya yo'q.", reply_markup=idle_kb())
-    await m.answer("▶️ <b>Davom etildi</b>\n\n" + _status_text(ws), reply_markup=active_kb())
-
-
 @rt.message(F.text == BTN_FINISH)
 async def on_finish(m: Message) -> None:
-    if await deny_if_not_worker(m):
+    if await deny_if_not_allowed(m):
         return
     uid = m.from_user.id
+    ws = get_open_session(DB_PATH, uid)
+    if not ws or ws.status != "active":
+        return await m.answer("⚠️ Faol sessiya yo'q.", reply_markup=main_kb())
+
     ws = request_finish(DB_PATH, uid)
     if not ws:
-        return await m.answer("⚠️ Faol sessiya yo'q.", reply_markup=idle_kb())
+        return await m.answer("⚠️ Sessiya topilmadi.", reply_markup=main_kb())
     push_session_end_background(tg_id=uid)
     await m.answer(
-        "🏁 <b>Yakunlash</b>\n\n"
-        "Nechta pozitsiya (markirovka) qildingiz?\n"
+        "🏁 <b>Tugatish</b>\n\n"
+        "Nechta pozitsiya markirovka qildingiz?\n"
         "Faqat raqam yuboring (masalan: <code>108</code>).",
-        reply_markup=awaiting_kb(),
+        reply_markup=qty_kb(),
+    )
+
+
+@rt.message(F.text == BTN_DONE)
+async def on_done_photos(m: Message) -> None:
+    if await deny_if_not_allowed(m):
+        return
+    uid = m.from_user.id
+    ws = get_open_session(DB_PATH, uid)
+    if not ws or ws.status != "awaiting_photos":
+        return await m.answer("⚠️ Rasm bosqichi faol emas.", reply_markup=main_kb())
+    if ws.photo_count < 1:
+        return await m.answer(
+            "⚠️ Kamida 1 ta rasm yuboring, keyin Yakunlash bosing.",
+            reply_markup=photo_kb(),
+        )
+
+    done = complete_session(DB_PATH, uid)
+    if not done:
+        return await m.answer("⚠️ Sessiyani yakunlab bo'lmadi.", reply_markup=photo_kb())
+
+    pts = calc_points(done.poz, done.work_sec)
+    summary = session_summary(done)
+    await sync_day_hub(uid)
+    mark_hub_pushed(DB_PATH, done.id)
+
+    await m.answer(
+        f"✅ <b>Sessiya yakunlandi!</b>\n\n"
+        f"Pozitsiya: <b>{done.poz}</b>\n"
+        f"Ish vaqti: <b>{fmt_clock(done.work_sec)}</b>\n"
+        f"Norm: {NORM_SEC_PER_POZ} sek/poz → <b>{fmt_clock(done.poz * NORM_SEC_PER_POZ)}</b>\n"
+        f"Rasmlar: <b>{done.photo_count}</b> ta\n"
+        f"Ball: <b>{pts}</b>\n\n"
+        f"Hub: <code>{summary}</code>",
+        reply_markup=main_kb(),
     )
 
 
 @rt.message(F.text == BTN_CANCEL)
 async def on_cancel(m: Message) -> None:
-    if await deny_if_not_worker(m):
+    if await deny_if_not_allowed(m):
         return
     uid = m.from_user.id
     ws = get_open_session(DB_PATH, uid)
     if not ws:
-        return await m.answer("Bekor qilinadigan sessiya yo'q.", reply_markup=idle_kb())
-    if ws.status == "awaiting_qty":
+        return await m.answer("Bekor qilinadigan sessiya yo'q.", reply_markup=main_kb())
+    if ws.status in ("awaiting_qty", "awaiting_photos"):
         cancel_open(DB_PATH, uid)
         push_session_end_background(tg_id=uid)
-        return await m.answer("❌ Sessiya bekor qilindi.", reply_markup=idle_kb())
-    await m.answer("Faqat miqdor kutilayotganda bekor qilish mumkin.", reply_markup=awaiting_kb())
+        return await m.answer("❌ Sessiya bekor qilindi.", reply_markup=main_kb())
+    await m.answer("Faqat miqdor/rasm bosqichida bekor qilish mumkin.", reply_markup=kb_for_session(ws))
 
 
 @rt.message(F.text == BTN_TODAY)
 async def on_today(m: Message) -> None:
-    if not m.from_user:
-        return
-    if await deny_if_not_worker(m):
+    if await deny_if_not_allowed(m):
         return
     uid = m.from_user.id
-    n, poz, sec = today_stats(DB_PATH, uid)
+    n, poz, sec, pts = today_stats(DB_PATH, uid)
     open_ws = get_open_session(DB_PATH, uid)
-    extra = ""
-    if open_ws:
-        extra = f"\n\n⚠️ Ochiq sessiya: {open_ws.status}"
+    extra = f"\n\n⚠️ Ochiq sessiya: {open_ws.status}" if open_ws else ""
     await m.answer(
         f"📊 <b>Bugun — {user_display_name(uid)}</b>\n"
         f"Sessiyalar: <b>{n}</b>\n"
-        f"Jami pozitsiya: <b>{poz}</b>\n"
-        f"Ish vaqti: <b>{fmt_clock(sec)}</b>{extra}",
-        reply_markup=paused_kb() if open_ws and open_ws.status == "paused"
-        else active_kb() if open_ws and open_ws.status == "active"
-        else awaiting_kb() if open_ws and open_ws.status == "awaiting_qty"
-        else idle_kb(),
+        f"Pozitsiya: <b>{poz}</b>\n"
+        f"Ish vaqti: <b>{fmt_clock(sec)}</b>\n"
+        f"Ball: <b>{pts}</b>{extra}",
+        reply_markup=kb_for_session(open_ws) if open_ws else main_kb(),
     )
 
 
 @rt.message(F.text.regexp(r"^\d+$"), F.chat.type == "private")
 async def on_quantity(m: Message) -> None:
-    if await deny_if_not_worker(m):
+    if await deny_if_not_allowed(m):
         return
     uid = m.from_user.id
     ws = get_open_session(DB_PATH, uid)
@@ -316,23 +372,50 @@ async def on_quantity(m: Message) -> None:
 
     poz = int((m.text or "0").strip())
     if poz <= 0 or poz > 9999:
-        return await m.answer("⚠️ 1 dan 9999 gacha raqam kiriting.")
+        return await m.answer("⚠️ 1 dan 9999 gacha raqam kiriting.", reply_markup=qty_kb())
 
-    done = complete_finish(DB_PATH, uid, poz)
-    if not done:
-        return await m.answer("⚠️ Sessiya topilmadi.")
-
-    summary = session_summary(done)
-    await sync_day_hub(uid)
-    mark_hub_pushed(DB_PATH, done.id)
+    ws = set_poz_await_photos(DB_PATH, uid, poz)
+    if not ws:
+        return await m.answer("⚠️ Sessiya topilmadi.", reply_markup=main_kb())
 
     await m.answer(
-        f"✅ <b>Saqlanadi!</b>\n\n"
-        f"Pozitsiya: <b>{poz}</b>\n"
-        f"Ish vaqti: <b>{fmt_clock(done.work_sec)}</b>\n"
-        f"Tanaffus: <b>{fmt_clock(done.pause_sec)}</b>\n\n"
-        f"Hub: <code>{summary}</code>",
-        reply_markup=idle_kb(),
+        f"✅ Pozitsiya: <b>{poz}</b>\n\n"
+        "📷 Endi markirovka qilingan tovarlar <b>rasmini</b> yuboring.\n"
+        "Rasm soni cheksiz — istalgancha yuboring.\n"
+        f"Hammasi tugagach <b>{BTN_DONE}</b> bosing.",
+        reply_markup=photo_kb(),
+    )
+
+
+@rt.message(F.photo, F.chat.type == "private")
+async def on_photo(m: Message) -> None:
+    if await deny_if_not_allowed(m):
+        return
+    uid = m.from_user.id
+    ws = get_open_session(DB_PATH, uid)
+    if not ws or ws.status != "awaiting_photos":
+        return
+
+    photo = m.photo[-1]
+    ws = add_session_photo(DB_PATH, uid, photo.file_id)
+    if not ws:
+        return
+
+    if GROUP_ID:
+        try:
+            cap = (
+                f"📷 Martekovka rasm\n"
+                f"{user_display_name(uid)} · sessiya #{ws.id}\n"
+                f"Poz: {ws.poz} · rasm #{ws.photo_count}"
+            )
+            await bot.send_photo(GROUP_ID, photo.file_id, caption=cap)
+        except Exception as e:
+            log.warning("Group photo forward: %s", e)
+
+    await m.answer(
+        f"📷 Rasm qabul qilindi (<b>{ws.photo_count}</b> ta).\n"
+        f"Yana rasm yuboring yoki <b>{BTN_DONE}</b> bosing.",
+        reply_markup=photo_kb(),
     )
 
 
@@ -344,9 +427,8 @@ async def cmd_whoami(m: Message) -> None:
     await m.answer(
         f"ID: <code>{uid}</code>\n"
         f"Ism: <b>{user_display_name(uid)}</b>\n"
-        f"Xodim: {'✅' if is_worker(uid) else '❌'}\n"
-        f"Admin: {'✅' if is_admin(uid) else '❌'}\n"
-        f"Bot: {'✅' if can_use_bot(uid) else '❌'}"
+        f"Bot: {'✅' if can_use_bot(uid) else '❌'}",
+        reply_markup=main_kb() if can_use_bot(uid) else ReplyKeyboardRemove(),
     )
 
 
@@ -356,20 +438,33 @@ async def cmd_sync(m: Message) -> None:
         return
     for tid in TG_EMPLOYEE:
         await sync_day_hub(tid)
-    await m.answer("✅ Bugungi hub sync bajarildi.")
+    await m.answer("✅ Hub sync bajarildi.", reply_markup=main_kb())
 
 
 @rt.message(F.chat.type == "private")
-async def on_private_unknown(m: Message) -> None:
-    """Ro'yxatda bo'lmaganlar — har qanday xabar blok."""
-    await deny_if_not_worker(m)
+async def on_private_fallback(m: Message) -> None:
+    if not m.from_user or not can_use_bot(m.from_user.id):
+        await deny_if_not_allowed(m)
+        return
+    ws = get_open_session(DB_PATH, m.from_user.id)
+    if ws and ws.status == "awaiting_photos":
+        return await m.answer(
+            "📷 Faqat rasm yuboring (foto).\n"
+            f"Tugatish: <b>{BTN_DONE}</b>",
+            reply_markup=photo_kb(),
+        )
+    if ws and ws.status == "awaiting_qty":
+        return await m.answer(
+            "🔢 Pozitsiya sonini raqam bilan yuboring.",
+            reply_markup=qty_kb(),
+        )
+    await m.answer("Tugmalardan foydalaning 👇", reply_markup=kb_for_session(ws) if ws else main_kb())
 
 
 async def startup_hub_backfill() -> None:
     day = today_iso()
     for tid in TG_EMPLOYEE:
-        sessions = today_done_sessions(DB_PATH, tid)
-        if sessions:
+        if today_done_sessions(DB_PATH, tid):
             try:
                 await sync_day_hub(tid, day)
             except Exception:
@@ -379,6 +474,7 @@ async def startup_hub_backfill() -> None:
 async def main() -> None:
     log.info(persistence_status_line(DB_PATH))
     init_db(DB_PATH)
+    await set_commands()
     await startup_hub_backfill()
     await ensure_polling_mode(bot)
     log.info("Martekovka bot started.")
