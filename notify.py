@@ -102,6 +102,8 @@ def finish_report(
     norm_sec_per_poz: int,
     photo_count: int,
     points: int,
+    hub_synced: bool = True,
+    hub_via: str = "",
 ) -> str:
     norm_total = poz * norm_sec_per_poz
     banner, verdict, bar = _finish_banner(
@@ -133,6 +135,15 @@ def finish_report(
         lines.append(verdict)
     lines.append(ball_line)
     lines.append(bar)
+    if hub_synced:
+        hub_line = "✅ Hisobot <b>Маркеровка</b> qatoriga yuborildi"
+        if hub_via:
+            hub_line += f"  <i>({html.escape(hub_via)})</i>"
+    else:
+        hub_line = (
+            "⚠️ <b>Маркеровка</b> qatoriga yuborilmadi — admin ga xabar bering.\n"
+            "<i>(YORDAMCHI_HUB_SECRET tekshirilsin)</i>"
+        )
     lines.extend(
         [
             "",
@@ -141,7 +152,7 @@ def finish_report(
             f"📐 Norma: <b>{fmt_duration_sec(norm_total)}</b>  "
             f"<i>({norm_sec_per_poz} sek/poz)</i>",
             "",
-            "✅ Hisobot <b>Маркеровка</b> qatoriga yuborildi",
+            hub_line,
         ]
     )
     return "\n".join(lines)

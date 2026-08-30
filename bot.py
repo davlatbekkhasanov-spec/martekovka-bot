@@ -41,6 +41,7 @@ from notify import (
 )
 from telegram_polling_guard import ensure_polling_mode
 from yordamchi_push import (
+    hub_configured,
     push_session_end_background,
     push_session_start_background,
     push_to_yordamchi_hub,
@@ -179,15 +180,21 @@ async def deny_if_not_allowed(m: Message) -> bool:
     return True
 
 
-async def sync_day_hub(tg_id: int, day: str | None = None) -> None:
+async def sync_day_hub(tg_id: int, day: str | None = None) -> tuple[bool, str]:
     day_iso = day or today_iso()
-    summary = daily_summary(today_done_sessions(DB_PATH, tg_id))
+    sessions = today_done_sessions(DB_PATH, tg_id)
+    if not sessions:
+        return False, "sessiya yo'q"
+    summary = daily_summary(sessions)
+    if not re.search(r"poz\s*[1-9]", summary.lower()):
+        return False, "poz 0"
     ok, via = await push_to_yordamchi_hub(tg_id=tg_id, summary=summary, day_iso=day_iso)
     if ok:
         log.info("Hub sync uid=%s via=%s %s", tg_id, via, summary[:80])
     else:
-        log.warning("Hub sync failed uid=%s via=%s", tg_id, via)
+        log.warning("Hub sync failed uid=%s via=%s summary=%s", tg_id, via, summary[:80])
         push_to_yordamchi_hub_background(tg_id=tg_id, summary=summary, day_iso=day_iso)
+    return ok, via
 
 
 def _status_text(ws) -> str:
@@ -319,8 +326,9 @@ async def on_done_photos(m: Message) -> None:
         return await m.answer("⚠️ Sessiyani yakunlab bo'lmadi.", reply_markup=photo_kb())
 
     pts = calc_points(done.poz, done.work_sec)
-    await sync_day_hub(uid)
-    mark_hub_pushed(DB_PATH, done.id)
+    hub_ok, hub_via = await sync_day_hub(uid)
+    if hub_ok:
+        mark_hub_pushed(DB_PATH, done.id)
 
     name = user_display_name(uid)
     report = finish_report(
@@ -332,6 +340,8 @@ async def on_done_photos(m: Message) -> None:
         norm_sec_per_poz=NORM_SEC_PER_POZ,
         photo_count=done.photo_count,
         points=pts,
+        hub_synced=hub_ok,
+        hub_via=hub_via,
     )
     await send_group(
         bot,
@@ -455,9 +465,19 @@ async def cmd_whoami(m: Message) -> None:
 async def cmd_sync(m: Message) -> None:
     if not m.from_user or not is_admin(m.from_user.id):
         return
+    ok_n = skip_n = fail_n = 0
     for tid in TG_EMPLOYEE:
-        await sync_day_hub(tid)
-    await m.answer("✅ Hub sync bajarildi.", reply_markup=main_kb())
+        ok, via = await sync_day_hub(tid)
+        if ok:
+            ok_n += 1
+        elif via == "sessiya yo'q":
+            skip_n += 1
+        else:
+            fail_n += 1
+    await m.answer(
+        f"✅ Hub sync: {ok_n} muvaffaqiyat, {skip_n} sessiyasiz, {fail_n} xato.",
+        reply_markup=main_kb(),
+    )
 
 
 @rt.message(F.chat.type == "private")
@@ -481,6 +501,12 @@ async def on_private_fallback(m: Message) -> None:
 
 
 async def startup_hub_backfill() -> None:
+    if not hub_configured():
+        log.error(
+            "YORDAMCHI hub sozlanmagan — hisobot yuborilmaydi. "
+            "YORDAMCHI_HUB_URL + YORDAMCHI_HUB_SECRET ni Railway da o'rnating."
+        )
+        return
     day = today_iso()
     for tid in TG_EMPLOYEE:
         if today_done_sessions(DB_PATH, tid):

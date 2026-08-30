@@ -70,7 +70,7 @@ TG_EMPLOYEE: dict[int, str] = {
     6931958983: "Mustafoev Abdullo",
     6991673998: "Sagdullaev Yunus",
     5465963344: "Shernazarov Tolib",
-    6001619806: "Samadov Tulqin",
+    6001619806: "Samadov To'lqin",
     5732350707: "Toxirov Muslimbek",
     8440127425: "Ravshanov Ziyodullo",
     PULAT_TG_ID: CANONICAL_PULAT,
