@@ -30,8 +30,10 @@ from storage import (
     request_finish,
     set_poz_await_photos,
     start_session,
+    done_sessions_for_day,
     today_done_sessions,
     today_stats,
+    unpushed_done_days,
 )
 from notify import (
     finish_report,
@@ -181,8 +183,8 @@ async def deny_if_not_allowed(m: Message) -> bool:
 
 
 async def sync_day_hub(tg_id: int, day: str | None = None) -> tuple[bool, str]:
-    day_iso = day or today_iso()
-    sessions = today_done_sessions(DB_PATH, tg_id)
+    day_iso = (day or today_iso())[:10]
+    sessions = done_sessions_for_day(DB_PATH, tg_id, day_iso)
     if not sessions:
         return False, "sessiya yo'q"
     summary = daily_summary(sessions)
@@ -190,9 +192,17 @@ async def sync_day_hub(tg_id: int, day: str | None = None) -> tuple[bool, str]:
         return False, "poz 0"
     ok, via = await push_to_yordamchi_hub(tg_id=tg_id, summary=summary, day_iso=day_iso)
     if ok:
-        log.info("Hub sync uid=%s via=%s %s", tg_id, via, summary[:80])
+        for s in sessions:
+            mark_hub_pushed(DB_PATH, s.id)
+        log.info("Hub sync uid=%s day=%s via=%s %s", tg_id, day_iso, via, summary[:80])
     else:
-        log.warning("Hub sync failed uid=%s via=%s summary=%s", tg_id, via, summary[:80])
+        log.warning(
+            "Hub sync failed uid=%s day=%s via=%s summary=%s",
+            tg_id,
+            day_iso,
+            via,
+            summary[:80],
+        )
         push_to_yordamchi_hub_background(tg_id=tg_id, summary=summary, day_iso=day_iso)
     return ok, via
 
@@ -327,8 +337,6 @@ async def on_done_photos(m: Message) -> None:
 
     pts = calc_points(done.poz, done.work_sec)
     hub_ok, hub_via = await sync_day_hub(uid)
-    if hub_ok:
-        mark_hub_pushed(DB_PATH, done.id)
 
     name = user_display_name(uid)
     report = finish_report(
@@ -465,9 +473,21 @@ async def cmd_whoami(m: Message) -> None:
 async def cmd_sync(m: Message) -> None:
     if not m.from_user or not is_admin(m.from_user.id):
         return
+    if not hub_configured():
+        return await m.answer(
+            "❌ Hub sozlanmagan.\n"
+            "Railway: YORDAMCHI_HUB_URL + YORDAMCHI_HUB_SECRET (yordamchi bilan bir xil).",
+            reply_markup=main_kb(),
+        )
+    args = (m.text or "").strip().split()[1:]
+    day = today_iso()
+    for a in args:
+        if len(a) == 10 and a[4] == "-" and a[7] == "-":
+            day = a
+            break
     ok_n = skip_n = fail_n = 0
     for tid in TG_EMPLOYEE:
-        ok, via = await sync_day_hub(tid)
+        ok, via = await sync_day_hub(tid, day)
         if ok:
             ok_n += 1
         elif via == "sessiya yo'q":
@@ -475,7 +495,9 @@ async def cmd_sync(m: Message) -> None:
         else:
             fail_n += 1
     await m.answer(
-        f"✅ Hub sync: {ok_n} muvaffaqiyat, {skip_n} sessiyasiz, {fail_n} xato.",
+        f"📅 {day}\n"
+        f"✅ Hub sync: {ok_n} muvaffaqiyat, {skip_n} sessiyasiz, {fail_n} xato.\n"
+        f"Keyin yordamchi botda: /synccategories {day}",
         reply_markup=main_kb(),
     )
 
@@ -507,13 +529,21 @@ async def startup_hub_backfill() -> None:
             "YORDAMCHI_HUB_URL + YORDAMCHI_HUB_SECRET ni Railway da o'rnating."
         )
         return
-    day = today_iso()
-    for tid in TG_EMPLOYEE:
-        if today_done_sessions(DB_PATH, tid):
+    days = unpushed_done_days(DB_PATH, limit=14)
+    if today_iso() not in days:
+        days.insert(0, today_iso())
+    seen: set[str] = set()
+    for day in days:
+        if day in seen:
+            continue
+        seen.add(day)
+        for tid in TG_EMPLOYEE:
+            if not done_sessions_for_day(DB_PATH, tid, day):
+                continue
             try:
                 await sync_day_hub(tid, day)
             except Exception:
-                log.exception("hub backfill tg=%s", tid)
+                log.exception("startup hub backfill tg=%s day=%s", tid, day)
 
 
 async def main() -> None:
