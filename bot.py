@@ -33,7 +33,7 @@ from storage import (
     done_sessions_for_day,
     today_done_sessions,
     today_stats,
-    unpushed_done_days,
+    recent_done_days,
 )
 from notify import (
     finish_report,
@@ -526,7 +526,7 @@ async def startup_hub_backfill() -> None:
     if not hub_configured():
         log.error("YORDAMCHI hub sozlanmagan — %s", hub_status_line())
         return
-    days = unpushed_done_days(DB_PATH, limit=14)
+    days = recent_done_days(DB_PATH, limit=14)
     if today_iso() not in days:
         days.insert(0, today_iso())
     seen: set[str] = set()

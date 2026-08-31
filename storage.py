@@ -296,12 +296,12 @@ def done_sessions_for_day(db_path: str, tg_id: int, day: str) -> list[Session]:
     return [_row_to_session(r) for r in rows if r]  # type: ignore[misc]
 
 
-def unpushed_done_days(db_path: str, *, limit: int = 14) -> list[str]:
+def recent_done_days(db_path: str, *, limit: int = 14) -> list[str]:
     con = _conn(db_path)
     rows = con.execute(
         """
         SELECT DISTINCT day FROM sessions
-        WHERE status = 'done' AND hub_pushed = 0 AND poz > 0
+        WHERE status = 'done' AND poz > 0
         ORDER BY day DESC
         LIMIT ?
         """,
