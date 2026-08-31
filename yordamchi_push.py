@@ -13,15 +13,25 @@ from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
-HUB_URL = (os.getenv("YORDAMCHI_HUB_URL", "").strip() or os.getenv("HUB_URL", "").strip()).rstrip("/")
+DEFAULT_HUB_URL = "https://davlat-yordamchi-bot-production.up.railway.app"
+
+HUB_URL = (
+    os.getenv("YORDAMCHI_HUB_URL", "").strip()
+    or os.getenv("HUB_URL", "").strip()
+    or DEFAULT_HUB_URL
+).rstrip("/")
 HUB_SECRET = (
     os.getenv("YORDAMCHI_HUB_SECRET", "").strip()
     or os.getenv("HUB_SECRET", "").strip()
 )
-TG_BOT_TOKEN = os.getenv("YORDAMCHI_BOT_TOKEN", "").strip()
-INGEST_CHAT_ID = int(
-    (os.getenv("YORDAMCHI_INGEST_CHAT_ID", "").strip() or os.getenv("INGEST_CHAT_ID", "0").strip() or "0")
+TG_BOT_TOKEN = os.getenv("YORDAMCHI_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
+_group_raw = (
+    os.getenv("YORDAMCHI_INGEST_CHAT_ID", "").strip()
+    or os.getenv("INGEST_CHAT_ID", "").strip()
+    or os.getenv("GROUP_ID", "").strip()
+    or "-1001877019294"
 )
+INGEST_CHAT_ID = int(_group_raw or "0")
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 
 BOT_KEY = "martekovka"
@@ -37,6 +47,19 @@ def hub_configured() -> bool:
     if TG_BOT_TOKEN and INGEST_CHAT_ID:
         return True
     return False
+
+
+def hub_status_line() -> str:
+    if HUB_URL and HUB_SECRET:
+        return f"HTTP ({HUB_URL})"
+    if TG_BOT_TOKEN and INGEST_CHAT_ID:
+        return f"Telegram ingest ({INGEST_CHAT_ID})"
+    missing = []
+    if not (HUB_URL and HUB_SECRET):
+        missing.append("YORDAMCHI_HUB_SECRET")
+    if not (TG_BOT_TOKEN and INGEST_CHAT_ID):
+        missing.append("YORDAMCHI_INGEST_CHAT_ID yoki GROUP_ID")
+    return "Hub sozlanmagan: " + ", ".join(missing)
 
 
 def _post_http(payload: dict) -> bool:
@@ -87,7 +110,7 @@ def _post_telegram(day: str, tg_id: int, bot_key: str, summary: str) -> bool:
 
 def _send_sync(payload: dict, day: str, tg_id: int, bot_key: str, summary: str) -> tuple[bool, str]:
     if not hub_configured():
-        return False, "Hub sozlanmagan"
+        return False, hub_status_line()
     if _post_http(payload):
         return True, "HTTP"
     if summary and _post_telegram(day, tg_id, bot_key, summary):

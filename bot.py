@@ -44,6 +44,7 @@ from notify import (
 from telegram_polling_guard import ensure_polling_mode
 from yordamchi_push import (
     hub_configured,
+    hub_status_line,
     push_session_end_background,
     push_session_start_background,
     push_to_yordamchi_hub,
@@ -475,8 +476,7 @@ async def cmd_sync(m: Message) -> None:
         return
     if not hub_configured():
         return await m.answer(
-            "❌ Hub sozlanmagan.\n"
-            "Railway: YORDAMCHI_HUB_URL + YORDAMCHI_HUB_SECRET (yordamchi bilan bir xil).",
+            f"❌ Hub sozlanmagan.\n{hub_status_line()}",
             reply_markup=main_kb(),
         )
     args = (m.text or "").strip().split()[1:]
@@ -524,10 +524,7 @@ async def on_private_fallback(m: Message) -> None:
 
 async def startup_hub_backfill() -> None:
     if not hub_configured():
-        log.error(
-            "YORDAMCHI hub sozlanmagan — hisobot yuborilmaydi. "
-            "YORDAMCHI_HUB_URL + YORDAMCHI_HUB_SECRET ni Railway da o'rnating."
-        )
+        log.error("YORDAMCHI hub sozlanmagan — %s", hub_status_line())
         return
     days = unpushed_done_days(DB_PATH, limit=14)
     if today_iso() not in days:
@@ -552,7 +549,7 @@ async def main() -> None:
     await set_commands()
     await startup_hub_backfill()
     await ensure_polling_mode(bot)
-    log.info("Markirovka bot started.")
+    log.info("Markirovka bot started. Hub: %s", hub_status_line())
     await dp.start_polling(bot)
 
 
